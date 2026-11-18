@@ -6,16 +6,18 @@ type P = { id: string; name: string; team: string; x: number; y: number; angle: 
 type B = { id: string; name: string; team: string; kills: number; deaths: number; alive: boolean }
 type Me = { money: number; hp: number; armor: number; ammo: number; weapon: string; actionProg: number; hasBomb: boolean; canBuy: boolean; reloading: boolean }
 type Feed = { killer: string; kTeam: string; victim: string; vTeam: string; weapon: string }
-type State = { t: number; ct: number; phase: string; left: number; round: number; msg: string; bomb: { planted: boolean; x: number | null; y: number | null; dropped: boolean }; me: Me; players: P[]; board: B[]; feed: Feed[]; shots: number[][] }
+type State = { t: number; ct: number; phase: string; left: number; round: number; msg: string; bomb: { planted: boolean; x: number | null; y: number | null; dropped: boolean }; doors: D[]; me: Me; players: P[]; board: B[]; feed: Feed[]; shots: number[][] }
 type Rect = { x: number; y: number; w: number; h: number }
 type Map = { width: number; height: number; walls: Rect[]; sites: Rect[] }
 type Weapon = { id: string; name: string; price: number; team: string; mag: number }
+type D = { x1: number; y1: number; x2: number; y2: number; open: number }
 
 const CT = '#5b9bf0', T = '#f0b340'
 const LABELS: [string, number, number][] = [
-  ['A SITE', 2400, 560], ['B SITE', 640, 600], ['CT SPAWN', 1836, 700], ['T SPAWN', 1140, 2640], ['MID', 1410, 1530], ['LONG A', 2586, 1155],
-  ['SHORT', 1923, 855], ['B TUNNELS', 525, 1446], ['LOWER TUNNEL', 1050, 1275], ['TOP MID', 1404, 1899], ['OUTSIDE TUNNEL', 594, 1980],
-  ['T RAMP', 390, 2484], ['PIT', 2586, 1908], ['LOWER MID', 1260, 780], ['B DOORS', 864, 831], ['LONG DOORS', 2055, 1830],
+  ['A SITE', 3604, 721], ['B SITE', 946, 541], ['CT SPAWN', 2793, 946], ['T SPAWN', 1757, 4035], ['MID', 2400, 2400], ['LONG A', 3900, 1800],
+  ['SHORT', 2900, 1300], ['B TUNNELS', 800, 1900], ['LOWER TUNNEL', 1600, 2400], ['TOP MID', 2400, 1500], ['OUTSIDE TUNNEL', 900, 3000],
+  ['T RAMP', 1200, 3400], ['PIT', 3900, 2900], ['LOWER MID', 2200, 1400], ['B DOORS', 1150, 1150], ['LONG DOORS', 3890, 2464],
+  ['MID DOORS', 2695, 1144],
 ]
 
 function roundRect(c: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -23,23 +25,24 @@ function roundRect(c: CanvasRenderingContext2D, x: number, y: number, w: number,
   c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath()
 }
 
-function buildMap(map: Map): HTMLCanvasElement {
+function buildMap(map: Map, radar: HTMLImageElement): HTMLCanvasElement {
   const k = 0.5; const cv = document.createElement('canvas'); cv.width = map.width * k; cv.height = map.height * k
   const c = cv.getContext('2d')!; c.scale(k, k)
-  const g = c.createLinearGradient(0, 0, map.width, map.height); g.addColorStop(0, '#d2b27a'); g.addColorStop(1, '#bf9d62')
-  c.fillStyle = g; c.fillRect(0, 0, map.width, map.height)
-  c.strokeStyle = 'rgba(80,55,20,0.09)'; c.lineWidth = 2; c.beginPath()
-  for (let x = 0; x < map.width; x += 96) { c.moveTo(x, 0); c.lineTo(x, map.height) }
-  for (let y = 0; y < map.height; y += 96) { c.moveTo(0, y); c.lineTo(map.width, y) }
-  c.stroke()
-  c.fillStyle = 'rgba(230,150,20,0.22)'; map.sites.forEach(w => c.fillRect(w.x, w.y, w.w, w.h))
-  c.strokeStyle = 'rgba(230,150,20,0.7)'; c.lineWidth = 6; map.sites.forEach(w => c.strokeRect(w.x, w.y, w.w, w.h))
-  c.font = 'bold 40px system-ui, sans-serif'; c.textAlign = 'center'; c.fillStyle = 'rgba(60,40,10,0.35)'
+  c.fillStyle = '#0b0b0d'; c.fillRect(0, 0, map.width, map.height)
+  if (radar.complete && radar.naturalWidth) {
+    c.filter = 'brightness(1.28) saturate(1.05)'
+    c.drawImage(radar, 0, 0, map.width, map.height)
+    c.filter = 'none'
+  } else {
+    const g = c.createLinearGradient(0, 0, map.width, map.height); g.addColorStop(0, '#d2b27a'); g.addColorStop(1, '#bf9d62')
+    c.fillStyle = g; c.fillRect(0, 0, map.width, map.height)
+  }
+  c.fillStyle = 'rgba(230,150,20,0.08)'; map.sites.forEach(w => c.fillRect(w.x, w.y, w.w, w.h))
+  c.strokeStyle = 'rgba(255,170,30,0.55)'; c.lineWidth = 4; map.sites.forEach(w => c.strokeRect(w.x, w.y, w.w, w.h))
+  c.font = 'bold 24px system-ui, sans-serif'; c.textAlign = 'center'; c.fillStyle = 'rgba(255,240,200,0.55)'
   LABELS.forEach(([t, x, y]) => c.fillText(t, x, y))
-  c.fillStyle = 'rgba(230,150,20,0.85)'; c.font = 'bold 150px system-ui, sans-serif'
-  const [a, b] = map.sites; c.fillText('A', a.x + a.w / 2, a.y + a.h / 2 + 52); c.fillText('B', b.x + b.w / 2, b.y + b.h / 2 + 52)
-  c.fillStyle = '#17130d'; map.walls.forEach(w => c.fillRect(w.x - 0.5, w.y - 0.5, w.w + 1, w.h + 1))
-  c.strokeStyle = '#6b5a3a'; c.lineWidth = 5; c.lineJoin = 'round'; map.walls.forEach(w => c.strokeRect(w.x, w.y, w.w, w.h))
+  c.fillStyle = 'rgba(255,190,40,0.9)'; c.font = 'bold 80px system-ui, sans-serif'
+  const [a, b] = map.sites; c.fillText('A', a.x + a.w / 2, a.y + a.h / 2 + 28); c.fillText('B', b.x + b.w / 2, b.y + b.h / 2 + 28)
   return cv
 }
 
@@ -52,15 +55,23 @@ export default function Game({ token, onExit }: { token: string; onExit: () => v
     const cv = ref.current!; const ctx = cv.getContext('2d')!
     const conn = new signalR.HubConnectionBuilder()
       .withUrl(`${BASE}/hub/game`, { accessTokenFactory: () => token }).build()
-    let mapCv: HTMLCanvasElement | null = null; const disp: Record<string, { x: number; y: number }> = {}; let lastHud = 0
+    let mapCv: HTMLCanvasElement | null = null; const radar = new Image(); radar.src = '/dust2_radar.png'; radar.onload = () => { mapCv = null }; const disp: Record<string, { x: number; y: number }> = {}; let lastHud = 0
     let me = ''; let myName = ''; let map: Map | null = null; let st: State | null = null; let weapons: Weapon[] = []; let myTeam = 'T'; let buyOpen = false
     let keys = 0; let firing = false; let mouse = { x: 0, y: 0 }; let tab = false
     let lastHp = 100; let hurt = 0
     const shots: { s: number[]; t: number }[] = []
     let raf = 0; let alive = true
 
-    let sc = 1, ox = 0, oy = 0
-    const layout = () => { if (!map) return; sc = Math.min(cv.width / map.width, cv.height / map.height); ox = (cv.width - map.width * sc) / 2; oy = (cv.height - map.height * sc) / 2 }
+    let sc = 1, ox = 0, oy = 0, camX = 0, camY = 0, camInit = false
+    const VIEW_W = 1800, VIEW_H = 1000 // world units visible on screen
+    const layout = () => {
+      if (!map) return
+      sc = Math.max(cv.width / VIEW_W, cv.height / VIEW_H)
+      const hw = cv.width / (2 * sc), hh = cv.height / (2 * sc)
+      camX = map.width > hw * 2 ? Math.min(Math.max(camX, hw), map.width - hw) : map.width / 2
+      camY = map.height > hh * 2 ? Math.min(Math.max(camY, hh), map.height - hh) : map.height / 2
+      ox = cv.width / 2 - camX * sc; oy = cv.height / 2 - camY * sc
+    }
     const resize = () => { cv.width = innerWidth; cv.height = innerHeight; layout() }
     const bit: Record<string, number> = { KeyW: 1, KeyA: 2, KeyS: 4, KeyD: 8, KeyE: 16, ShiftLeft: 32 }
     const angle = () => {
@@ -87,7 +98,7 @@ export default function Game({ token, onExit }: { token: string; onExit: () => v
 
     conn.on('state', (s: State) => { st = s; myTeam = s.players.find(p => p.id === me)?.team ?? myTeam; setTeam(myTeam); s.shots.forEach(x => shots.push({ s: x, t: performance.now() })) })
     conn.start().then(() => conn.invoke('FindMatch')).then(r => {
-      if (!alive) return; me = r.you; map = r.map; weapons = r.weapons; setList(weapons.filter(w => w.price > 0)); layout(); setStatus('')
+      if (!alive) return; me = r.you; map = r.map; weapons = r.weapons; setList(weapons.filter(w => w.price > 0)); layout(); camInit = false; setStatus('')
     }).catch(() => setStatus('Connection failed'))
 
     const teamCol = (t: string) => (t === 'T' ? T : CT)
@@ -106,25 +117,38 @@ export default function Game({ token, onExit }: { token: string; onExit: () => v
       if (m.hp < lastHp) hurt = 1
       lastHp = m.hp; hurt = Math.max(0, hurt - 0.03)
 
+      const focus = you.hp > 0 ? you : (st.players.find(p => p.team === myTeam && p.hp > 0) ?? you)
+      if (!camInit) { camX = focus.x; camY = focus.y; camInit = true }
+      else { camX += (focus.x - camX) * 0.25; camY += (focus.y - camY) * 0.25 }
+      layout()
+
       ctx.save(); ctx.translate(ox, oy); ctx.scale(sc, sc)
-      if (!mapCv) mapCv = buildMap(map)
+      if (!mapCv) mapCv = buildMap(map, radar)
       ctx.drawImage(mapCv, 0, 0, map.width, map.height)
+
+      // doors (world-space leaves)
+      ;(st.doors ?? []).forEach(d => {
+        ctx.strokeStyle = d.open > 0.5 ? 'rgba(120,85,50,0.75)' : '#6b4a2a'
+        ctx.lineWidth = 8; ctx.beginPath(); ctx.moveTo(d.x1, d.y1); ctx.lineTo(d.x2, d.y2); ctx.stroke()
+        ctx.strokeStyle = '#b08a5a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(d.x1, d.y1); ctx.lineTo(d.x2, d.y2); ctx.stroke()
+        ctx.fillStyle = '#d0b070'; ctx.beginPath(); ctx.arc(d.x2, d.y2, 3, 0, 7); ctx.fill()
+      })
 
       // tracers
       while (shots.length && now - shots[0].t > 120) shots.shift()
       shots.forEach(({ s, t }) => {
         const a = 1 - (now - t) / 120
-        ctx.strokeStyle = `rgba(255,230,120,${a})`; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(s[0], s[1]); ctx.lineTo(s[2], s[3]); ctx.stroke()
-        ctx.fillStyle = `rgba(255,255,255,${a})`; ctx.beginPath(); ctx.arc(s[2], s[3], 8, 0, 7); ctx.fill()
+        ctx.strokeStyle = `rgba(255,230,120,${a})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(s[0], s[1]); ctx.lineTo(s[2], s[3]); ctx.stroke()
+        ctx.fillStyle = `rgba(255,255,255,${a})`; ctx.beginPath(); ctx.arc(s[2], s[3], 5, 0, 7); ctx.fill()
       })
 
       // bomb
       if (st.bomb.x != null && st.bomb.y != null) {
         const blink = st.bomb.planted && Math.floor(now / (st.left < 10 ? 120 : 400)) % 2
         ctx.save(); ctx.translate(st.bomb.x, st.bomb.y)
-        if (st.bomb.planted) { ctx.strokeStyle = `rgba(255,60,60,${blink ? 0.7 : 0.15})`; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(0, 0, 70, 0, 7); ctx.stroke() }
-        ctx.fillStyle = '#222'; roundRect(ctx, -22, -14, 44, 28, 4); ctx.fill()
-        ctx.fillStyle = blink ? '#ff3030' : '#661010'; ctx.fillRect(-12, -6, 24, 12)
+        if (st.bomb.planted) { ctx.strokeStyle = `rgba(255,60,60,${blink ? 0.7 : 0.15})`; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(0, 0, 50, 0, 7); ctx.stroke() }
+        ctx.fillStyle = '#222'; roundRect(ctx, -14, -9, 28, 18, 4); ctx.fill()
+        ctx.fillStyle = blink ? '#ff3030' : '#661010'; ctx.fillRect(-8, -4, 16, 8)
         ctx.restore()
       }
 
@@ -134,31 +158,49 @@ export default function Game({ token, onExit }: { token: string; onExit: () => v
         d.x += (p.x - d.x) * 0.4; d.y += (p.y - d.y) * 0.4
         if (Math.abs(p.x - d.x) > 300 || Math.abs(p.y - d.y) > 300) { d.x = p.x; d.y = p.y }
         const ally = p.team === myTeam
-        if (p.hp <= 0) { ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.beginPath(); ctx.arc(d.x, d.y, 18, 0, 7); ctx.fill(); return }
+        if (p.hp <= 0) { ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.beginPath(); ctx.arc(d.x, d.y, 8, 0, 7); ctx.fill(); return }
         ctx.save(); ctx.translate(d.x, d.y)
-        ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(4, 6, 22, 20, 0, 0, 7); ctx.fill()
+        ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(3, 5, 17, 15, 0, 0, 7); ctx.fill()
         ctx.rotate(p.angle)
-        ctx.fillStyle = '#26282c'; roundRect(ctx, 8, -5, 40, 10, 3); ctx.fill() // gun
-        ctx.fillStyle = teamCol(p.team); ctx.strokeStyle = '#101010'; ctx.lineWidth = 4
-        ctx.beginPath(); ctx.arc(0, 0, p.id === me ? 24 : 21, 0, 7); ctx.fill(); ctx.stroke()
-        ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.beginPath(); ctx.arc(8, 0, 9, 0, 7); ctx.fill() // head
+        ctx.fillStyle = '#26282c'; roundRect(ctx, 6, -3.5, 26, 7, 2); ctx.fill() // gun
+        ctx.fillStyle = teamCol(p.team); ctx.strokeStyle = '#101010'; ctx.lineWidth = 2
+        ctx.beginPath(); ctx.arc(0, 0, 16, 0, 7); ctx.fill(); ctx.stroke()
+        ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.beginPath(); ctx.arc(5, 0, 5.5, 0, 7); ctx.fill() // head
         ctx.restore()
-        if (p.id === me) { ctx.strokeStyle = '#7cff7c'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(d.x, d.y, 32, 0, 7); ctx.stroke() }
+        if (p.id === me) { ctx.strokeStyle = '#7cff7c'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(d.x, d.y, 21, 0, 7); ctx.stroke() }
         if (ally && p.id !== me) {
-          text(p.name, d.x, d.y - 40, 26, '#cfe6ff', 'center', '600')
-          ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(d.x - 30, d.y - 34, 60, 7)
-          ctx.fillStyle = p.hp > 30 ? '#6bd46b' : '#e05050'; ctx.fillRect(d.x - 30, d.y - 34, 60 * p.hp / 100, 7)
+          text(p.name, d.x, d.y - 26, 18, '#cfe6ff', 'center', '600')
+          ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(d.x - 22, d.y - 21, 44, 5)
+          ctx.fillStyle = p.hp > 30 ? '#6bd46b' : '#e05050'; ctx.fillRect(d.x - 22, d.y - 21, 44 * p.hp / 100, 5)
         }
-        if (p.actionProg > 0) { ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(d.x - 32, d.y + 34, 64, 10); ctx.fillStyle = '#fff'; ctx.fillRect(d.x - 32, d.y + 34, 64 * p.actionProg, 10) }
+        if (p.actionProg > 0) { ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(d.x - 24, d.y + 22, 48, 6); ctx.fillStyle = '#fff'; ctx.fillRect(d.x - 24, d.y + 22, 48 * p.actionProg, 6) }
         p.x = d.x; p.y = d.y
       })
 
       // view-range vignette around you
       const yd = disp[me] ?? you
-      const gr = ctx.createRadialGradient(yd.x, yd.y, 600, yd.x, yd.y, 1000)
+      const gr = ctx.createRadialGradient(yd.x, yd.y, 500, yd.x, yd.y, 900)
       gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,0.5)')
       ctx.fillStyle = gr; ctx.fillRect(0, 0, map.width, map.height)
       ctx.restore()
+
+      // minimap (world is now larger than the viewport, so keep an overview)
+      const mm = 178, mmx = 16, mmy = 56
+      if (mapCv) {
+        panel(mmx, mmy, mm, mm, 0.55)
+        ctx.save(); ctx.globalAlpha = 0.85; ctx.drawImage(mapCv, mmx, mmy, mm, mm); ctx.restore()
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.strokeRect(mmx, mmy, mm, mm)
+        const kx = mm / map.width, ky = mm / map.height
+        const hw = cv.width / (2 * sc), hh = cv.height / (2 * sc)
+        ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.strokeRect(mmx + (camX - hw) * kx, mmy + (camY - hh) * ky, hw * 2 * kx, hh * 2 * ky)
+        st.players.forEach(p => {
+          if (p.hp <= 0) return
+          ctx.fillStyle = p.id === me ? '#7cff7c' : teamCol(p.team)
+          ctx.beginPath(); ctx.arc(mmx + p.x * kx, mmy + p.y * ky, 2.2, 0, 7); ctx.fill()
+        })
+        if (st.bomb.x != null && st.bomb.y != null) { ctx.fillStyle = '#ff4040'; ctx.beginPath(); ctx.arc(mmx + st.bomb.x * kx, mmy + st.bomb.y * ky, 3, 0, 7); ctx.fill() }
+        text('DUST II', mmx + 6, mmy + mm - 6, 10, 'rgba(255,255,255,0.65)', 'left', '700')
+      }
 
       const W = cv.width, H = cv.height
       const dead = m.hp <= 0
@@ -204,6 +246,17 @@ export default function Game({ token, onExit }: { token: string; onExit: () => v
 
       // action bar
       if (m.actionProg > 0) { panel(W / 2 - 110, H - 110, 220, 22); ctx.fillStyle = '#fff'; ctx.fillRect(W / 2 - 104, H - 104, 208 * m.actionProg, 10) }
+
+      // door hint
+      if (!dead) {
+        const nearDoor = (st.doors ?? []).some(d => {
+          const vx = d.x2 - d.x1, vy = d.y2 - d.y1, len2 = vx * vx + vy * vy
+          const t = len2 < 1e-6 ? 0 : Math.max(0, Math.min(1, ((you.x - d.x1) * vx + (you.y - d.y1) * vy) / len2))
+          const dx = you.x - (d.x1 + vx * t), dy = you.y - (d.y1 + vy * t)
+          return dx * dx + dy * dy < 80 * 80
+        })
+        if (nearDoor) text('E — open/close door', W / 2, H - 146, 14, '#ddd', 'center', '600')
+      }
 
       // round-end / center messages
       if (st.msg) {

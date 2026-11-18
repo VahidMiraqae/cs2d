@@ -6,21 +6,23 @@ public class Player
     public int Seq;
     public float X, Y, Angle; public int Hp, Armor, Ammo, Kills, Deaths, Money = 1000;
     public string Weapon = "glock";
-    public int Keys; public bool Firing, IsBot;
-    public double NextShot, ReloadEnd, RepathAt, SeenSince, LastSeenAt = -99; public float LastSeenX, LastSeenY; public float ActionProg, PathX, PathY;
+    public int Keys; public bool Firing, IsBot, UseWasDown;
+    public double NextShot, ReloadEnd, RepathAt, SeenSince, LastSeenAt = -99, NextDoorAt; public float LastSeenX, LastSeenY; public float ActionProg, PathX, PathY;
     public bool Alive => Hp > 0;
 }
 
 public record Shot(float X1, float Y1, float X2, float Y2, string Shooter);
 
-/// <summary>One casual bomb-defusal match: 5v5, freeze time, bomb plant/defuse, economy, side swap at halftime.</summary>
+/// <summary>One casual bomb-defusal match: freeze time, bomb plant/defuse, economy, Dust II doors.</summary>
 public class Room
 {
     public const int MaxPlayers = 20, BotTarget = 5, FreezeTime = 10, RoundTime = 115, BuyTime = 45, BombTime = 45, WinRounds = 8, MaxMoney = 10000, PlantMoney = 200;
-    public const float Speed = 260, Radius = 16, ViewRange = 900, PlantTime = 3.2f, DefuseTime = 5f; // casual: every CT has a kit
+    // CS2 scale: 250 u/s run speed, 16-unit player radius, 1500-unit top-down view range.
+    public const float Speed = 250, Radius = 16, ViewRange = 1500, PlantTime = 3.2f, DefuseTime = 5f; // casual: every CT has a kit
     // key bits: 1=W 2=A 4=S 8=D 16=use(E) 32=walk(shift)
     public string Id = Guid.NewGuid().ToString("N")[..8];
     public Dictionary<string, Player> Players = new();
+    public readonly List<Door> Doors = Dust2Data.DoorDefs.Select(d => new Door(d)).ToList();
     public List<Shot> Shots = new();
     readonly List<(double T, string Killer, string KTeam, string Victim, string VTeam, string Weapon)> feed = new();
     public int ScoreT, ScoreCt, RoundNo, LossT, LossCt;
@@ -105,13 +107,14 @@ public class Room
         var spawns = p.Team == "T" ? GameMap.TSpawns : GameMap.CtSpawns;
         (p.X, p.Y) = spawns[Players.Values.Count(o => o.Team == p.Team && o != p && o.Seq < p.Seq) % spawns.Length];
         p.Hp = alive ? 100 : 0; p.Armor = alive ? 100 : 0; // casual: free armor
-        p.Ammo = Weapons.Get(p.Weapon).Mag; p.ReloadEnd = 0; p.ActionProg = 0; p.Keys = 0; p.Firing = false;
+        p.Ammo = Weapons.Get(p.Weapon).Mag; p.ReloadEnd = 0; p.ActionProg = 0; p.Keys = 0; p.Firing = false; p.UseWasDown = false; p.NextDoorAt = 0;
     }
 
     void StartRound(bool fullReset)
     {
         RoundNo++; roundStart = time; Phase = "freeze"; phaseEnd = time + FreezeTime; Msg = "";
         planted = false; dropped = false; carrier = null; botSite = Rng.Next(2);
+        foreach (var d in Doors) { d.Open = false; d.Anim = 0; }
         foreach (var p in Players.Values)
         {
             if (fullReset) p.Money = 1000;
@@ -162,6 +165,7 @@ public class Room
         lock (gate)
         {
             time += dt; Shots.Clear();
+            foreach (var d in Doors) d.Step(dt);
             if (RoundNo == 0) StartRound(true);
             if (Phase == "end" && time >= phaseEnd)
             {
@@ -174,7 +178,7 @@ public class Room
             foreach (var p in Players.Values)
             {
                 if (!p.Alive) { p.ActionProg = 0; continue; }
-                if (p.IsBot) Think(p);
+                if (p.IsBot) { Think(p); AutoOpenDoor(p); }
                 bool moveKeys = (p.Keys & 15) != 0;
                 var w = Weapons.Get(p.Weapon);
                 if (Phase != "freeze")
@@ -186,8 +190,8 @@ public class Room
                     {
                         var sp = Speed * w.Speed * ((p.Keys & 32) != 0 ? 0.5f : 1f) * dt / len;
                         mx *= sp; my *= sp;
-                        if (!GameMap.Collides(p.X + mx, p.Y, Radius)) p.X += mx;
-                        if (!GameMap.Collides(p.X, p.Y + my, Radius)) p.Y += my;
+                        if (!Collides(p.X + mx, p.Y)) p.X += mx;
+                        if (!Collides(p.X, p.Y + my)) p.Y += my;
                     }
                 }
                 if (p.ReloadEnd > 0 && time >= p.ReloadEnd) { p.Ammo = w.Mag; p.ReloadEnd = 0; }
@@ -198,8 +202,19 @@ public class Room
                 }
                 if (!p.Alive) continue;
 
+                // doors: E toggles a nearby door on the rising edge (plant/defuse take priority)
+                bool eDown = (p.Keys & 16) != 0;
+                bool canPlant = p.Id == carrier && Phase == "live" && GameMap.InSite(p.X, p.Y);
+                bool canDefuse = planted && p.Team == "CT" && Dist(p.X, p.Y, bombX, bombY) < 70;
+                if (eDown && !p.UseWasDown && !canPlant && !canDefuse)
+                {
+                    var set = NearestDoor(p.X, p.Y, 80);
+                    if (set != null) SetDoor(set, !Doors.First(d => d.Set == set).Open);
+                }
+                p.UseWasDown = eDown;
+
                 // plant / defuse / bomb pickup
-                bool use = (p.Keys & 16) != 0 && !moveKeys && combat;
+                bool use = eDown && !moveKeys && combat;
                 bool acting = false;
                 if (p.Id == carrier && Phase == "live" && use && GameMap.InSite(p.X, p.Y))
                 {
@@ -275,7 +290,7 @@ public class Room
             var dx = e.X - b.X; var dy = e.Y - b.Y; var d2 = dx * dx + dy * dy;
             if (d2 >= best) continue;
             var d = MathF.Sqrt(d2);
-            if (d < 1 || GameMap.Raycast(b.X, b.Y, dx / d, dy / d, d) >= d - 1) { best = d2; tgt = e; }
+            if (d < 1 || (GameMap.Raycast(b.X, b.Y, dx / d, dy / d, d) >= d - 1 && !DoorBlocksRay(b.X, b.Y, e.X, e.Y))) { best = d2; tgt = e; }
         }
         // After a plant, the CT bot closest to the bomb is the defuser: it ignores enemies that are not close.
         bool defuser = planted && b.Team == "CT" && IsDefuser(b);
@@ -301,7 +316,7 @@ public class Room
                     float side = ((int)(time * 1.1 + b.Seq) % 2 == 0) ? 1 : -1;
                     float px = -MathF.Sin(b.Angle) * side, py = MathF.Cos(b.Angle) * side;
                     b.Keys = (px > 0.3f ? 8 : px < -0.3f ? 2 : 0) | (py > 0.3f ? 4 : py < -0.3f ? 1 : 0);
-                    if (GameMap.Collides(b.X + px * 30, b.Y + py * 30, Radius)) b.Keys = 0;
+                    if (Collides(b.X + px * 30, b.Y + py * 30)) b.Keys = 0;
                 }
                 return;
             }
@@ -361,9 +376,55 @@ public class Room
     bool Sees(Player v, Player o)
     {
         if (v == o) return true;
-        float dx = o.X - v.X, dy = o.Y - v.Y; var d = MathF.Sqrt(dx * dx + dy * dy);
-        if (d > ViewRange) return false;
-        return d < 1 || GameMap.Raycast(v.X, v.Y, dx / d, dy / d, d) >= d - 1;
+        float dx = o.X - v.X, dy = o.Y - v.Y; var dist = MathF.Sqrt(dx * dx + dy * dy);
+        if (dist > ViewRange) return false;
+        if (dist < 1) return true;
+        var nx = dx / dist; var ny = dy / dist;
+        if (GameMap.Raycast(v.X, v.Y, nx, ny, dist) < dist - 1) return false;
+        return !DoorBlocksRay(v.X, v.Y, o.X, o.Y, nx, ny, dist);
+    }
+
+    bool DoorBlocksRay(float ax, float ay, float bx, float by) =>
+        DoorBlocksRay(ax, ay, bx, by, 0, 0, 0);
+
+    bool DoorBlocksRay(float ax, float ay, float bx, float by, float nx, float ny, float dist)
+    {
+        if (nx == 0 && ny == 0)
+        {
+            var dx = bx - ax; var dy = by - ay; dist = MathF.Sqrt(dx * dx + dy * dy);
+            if (dist < 1) return false;
+            nx = dx / dist; ny = dy / dist;
+        }
+        return Doors.Any(d => d.Blocking && DoorGeo.SegmentRay(d.HingeX, d.HingeY, d.EndX, d.EndY, ax, ay, nx, ny, dist));
+    }
+
+    bool Collides(float x, float y) =>
+        GameMap.Collides(x, y, Radius) ||
+        Doors.Any(d => d.Blocking && DoorGeo.SegmentCircle(d.HingeX, d.HingeY, d.EndX, d.EndY, x, y, Radius + 4));
+
+    string? NearestDoor(float x, float y, float range)
+    {
+        foreach (var d in Doors)
+            if (Dist(x, y, d.HingeX, d.HingeY) <= range || Dist(x, y, d.EndX, d.EndY) <= range ||
+                DoorGeo.SegmentCircle(d.HingeX, d.HingeY, d.EndX, d.EndY, x, y, range))
+                return d.Set;
+        return null;
+    }
+
+    void SetDoor(string set, bool open)
+    {
+        foreach (var d in Doors) if (d.Set == set) d.Open = open;
+    }
+
+    void AutoOpenDoor(Player b)
+    {
+        if (b.Keys == 0 || time < b.NextDoorAt) return;
+        foreach (var d in Doors)
+            if (!d.Open && d.Anim < 0.01f &&
+                (Dist(b.X, b.Y, d.HingeX, d.HingeY) < 90 || Dist(b.X, b.Y, d.EndX, d.EndY) < 90))
+            {
+                SetDoor(d.Set, true); b.NextDoorAt = time + 1; return;
+            }
     }
 
     /// <summary>Only what the viewer sees (range + line of sight). Dead players share their living teammates' vision; everyone sees all at round end.</summary>
@@ -380,6 +441,7 @@ public class Room
             {
                 t = ScoreT, ct = ScoreCt, phase = Phase, left = Math.Max(0, phaseEnd - time), round = RoundNo, msg = Msg,
                 bomb = new { planted, x = planted ? bombX : showDrop ? dropX : (float?)null, y = planted ? bombY : showDrop ? dropY : (float?)null, dropped = showDrop },
+                doors = Doors.Select(d => d.View()).ToArray(),
                 me = new { v.Money, v.Hp, v.Armor, v.Ammo, v.Weapon, v.ActionProg, hasBomb = carrier == v.Id, canBuy = CanBuy() && v.Alive, reloading = v.ReloadEnd > 0 },
                 feed = feed.Where(f => time - f.T < 6).TakeLast(5).Select(f => new { killer = f.Killer, kTeam = f.KTeam, victim = f.Victim, vTeam = f.VTeam, weapon = f.Weapon }).ToArray(),
                 board = Players.Values.Select(p => new { p.Id, p.Name, p.Team, p.Kills, p.Deaths, p.Alive }).ToArray(),
