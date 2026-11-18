@@ -24,7 +24,7 @@ if ($NoRun) { return }
 # Allow LAN connections through Windows Firewall (needs admin; skipped with a hint otherwise)
 $rule = "CS2D $Port"
 if (-not (Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue)) {
-  try { New-NetFirewallRule -DisplayName $rule -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -Profile Private,Domain | Out-Null; Write-Host "Firewall rule '$rule' added" -ForegroundColor Green }
+  try { New-NetFirewallRule -DisplayName $rule -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -Profile Private,Domain -ErrorAction Stop | Out-Null; Write-Host "Firewall rule '$rule' added" -ForegroundColor Green }
   catch { Write-Host "Could not add a firewall rule (run PowerShell as Administrator once if others can't connect)." -ForegroundColor Yellow }
 }
 

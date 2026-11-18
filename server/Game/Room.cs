@@ -7,7 +7,7 @@ public class Player
     public float X, Y, Angle; public int Hp, Armor, Ammo, Kills, Deaths, Money = 1000;
     public string Weapon = "glock";
     public int Keys; public bool Firing, IsBot;
-    public double NextShot, ReloadEnd, RepathAt, SeenSince; public float ActionProg, PathX, PathY;
+    public double NextShot, ReloadEnd, RepathAt, SeenSince, LastSeenAt = -99; public float LastSeenX, LastSeenY; public float ActionProg, PathX, PathY;
     public bool Alive => Hp > 0;
 }
 
@@ -258,6 +258,9 @@ public class Room
                 if (carrier == hit.Id) { carrier = null; dropped = true; dropX = hit.X; dropY = hit.Y; }
             }
         }
+        // bots hear gunfire nearby and remember where a shot came from; a bot that was hit knows its attacker
+        foreach (var o in Players.Values)
+            if (o.IsBot && o.Alive && o.Team != s.Team && (o == hit || Dist(o.X, o.Y, s.X, s.Y) < 1100)) { o.LastSeenX = s.X; o.LastSeenY = s.Y; o.LastSeenAt = time; }
         Shots.Add(new Shot(s.X, s.Y, s.X + dx * hitD, s.Y + dy * hitD, s.Id));
     }
 
@@ -286,20 +289,39 @@ public class Room
             b.Angle = MathF.Atan2(tgt.Y - b.Y, tgt.X - b.X) + (float)(Rng.NextDouble() - 0.5) * 0.35f;
             if (b.SeenSince == 0) b.SeenSince = time;
             // reaction delay, then fire in bursts
-            b.Firing = time - b.SeenSince > 0.5 && (time * 2 + b.Seq) % 1 < 0.55;
-             gx = tgt.X; gy = tgt.Y; stopNear = d < 450;
-            if (stopNear) return;
+            b.LastSeenX = tgt.X; b.LastSeenY = tgt.Y; b.LastSeenAt = time;
+            // peek-strafe, then stop and shoot a burst (stopping keeps their shots accurate)
+            bool strafing = (time * 1.1 + b.Seq * 0.37) % 2 < 0.7;
+            b.Firing = time - b.SeenSince > 0.5 && !strafing && (time * 2 + b.Seq) % 1 < 0.7;
+            gx = tgt.X; gy = tgt.Y; stopNear = d < 450;
+            if (stopNear)
+            {
+                if (strafing)
+                {
+                    float side = ((int)(time * 1.1 + b.Seq) % 2 == 0) ? 1 : -1;
+                    float px = -MathF.Sin(b.Angle) * side, py = MathF.Cos(b.Angle) * side;
+                    b.Keys = (px > 0.3f ? 8 : px < -0.3f ? 2 : 0) | (py > 0.3f ? 4 : py < -0.3f ? 1 : 0);
+                    if (GameMap.Collides(b.X + px * 30, b.Y + py * 30, Radius)) b.Keys = 0;
+                }
+                return;
+            }
         }
         else if (b.Team == "T")
         {
-            if (planted) { gx = bombX; gy = bombY; stopNear = Dist(b.X, b.Y, gx, gy) < 250; }
+            if (planted)
+            {
+                gx = bombX; gy = bombY;
+                bool defusing = Players.Values.Any(o => o.Team == "CT" && o.Alive && o.ActionProg > 0);
+                stopNear = !defusing && Dist(b.X, b.Y, gx, gy) < 250; // retake: rush the defuser
+            }
             else if (b.Id == carrier)
             {
                 (gx, gy) = GameMap.SiteCenter(botSite);
                 if (GameMap.InSite(b.X, b.Y) && Dist(b.X, b.Y, gx, gy) < 120) { b.Keys = 16; return; }
             }
             else if (dropped) { gx = dropX; gy = dropY; }
-            else { (gx, gy) = GameMap.SiteCenter(botSite); stopNear = Dist(b.X, b.Y, gx, gy) < 200; }
+            else if (time - b.LastSeenAt < 5) { gx = b.LastSeenX; gy = b.LastSeenY; if (Dist(b.X, b.Y, gx, gy) < 90) b.LastSeenAt = -99; }
+            else { (gx, gy) = GameMap.SiteCenter(b.Seq % 3 == 0 ? 1 - botSite : botSite); stopNear = Dist(b.X, b.Y, gx, gy) < 200; } // some Ts split to the other site
         }
         else
         {
@@ -310,9 +332,14 @@ public class Room
                 if (defuser && bd < 45) { b.Keys = 16; return; }
                 stopNear = !defuser && bd < 250; // teammates cover the defuser
             }
+            else if (time - b.LastSeenAt < 5) { gx = b.LastSeenX; gy = b.LastSeenY; if (Dist(b.X, b.Y, gx, gy) < 90) b.LastSeenAt = -99; }
             else { (gx, gy) = GameMap.SiteCenter(b.Seq % 2); stopNear = Dist(b.X, b.Y, gx, gy) < 250; }
         }
-        if (stopNear && tgt == null) return;
+        if (stopNear && tgt == null)
+        {
+            if (b.ReloadEnd == 0 && b.Ammo < Weapons.Get(b.Weapon).Mag / 2) b.ReloadEnd = time + Weapons.Get(b.Weapon).Reload; // reload while holding
+            return;
+        }
         if (time >= b.RepathAt || Dist(b.X, b.Y, b.PathX, b.PathY) < 15)
         {
             var n = GameMap.NextStep(b.X, b.Y, gx, gy) ?? (gx, gy);
