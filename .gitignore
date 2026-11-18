@@ -1,3 +1,5 @@
 server/bin
 server/obj
 server/users.json
+server/wwwroot
+publish

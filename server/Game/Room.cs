@@ -22,6 +22,7 @@ public class Room
     public string Id = Guid.NewGuid().ToString("N")[..8];
     public Dictionary<string, Player> Players = new();
     public List<Shot> Shots = new();
+    readonly List<(double T, string Killer, string KTeam, string Victim, string VTeam, string Weapon)> feed = new();
     public int ScoreT, ScoreCt, RoundNo, LossT, LossCt;
     public string Phase = "freeze", Msg = "";
     double time, phaseEnd, roundStart; bool matchOver;
@@ -253,7 +254,7 @@ public class Room
             hit.Hp -= (int)MathF.Ceiling(dmg);
             if (hit.Hp <= 0)
             {
-                hit.Hp = 0; hit.Deaths++; s.Kills++; s.Money = Math.Min(MaxMoney, s.Money + w.Reward / 2);
+                hit.Hp = 0; feed.Add((time, s.Name, s.Team, hit.Name, hit.Team, w.Name)); hit.Deaths++; s.Kills++; s.Money = Math.Min(MaxMoney, s.Money + w.Reward / 2);
                 if (carrier == hit.Id) { carrier = null; dropped = true; dropX = hit.X; dropY = hit.Y; }
             }
         }
@@ -273,6 +274,9 @@ public class Room
             var d = MathF.Sqrt(d2);
             if (d < 1 || GameMap.Raycast(b.X, b.Y, dx / d, dy / d, d) >= d - 1) { best = d2; tgt = e; }
         }
+        // After a plant, the CT bot closest to the bomb is the defuser: it ignores enemies that are not close.
+        bool defuser = planted && b.Team == "CT" && IsDefuser(b);
+        if (defuser && tgt != null && best > 350 * 350) tgt = null;
         if (tgt == null) b.SeenSince = 0;
         if (Phase == "freeze") return;
         float gx, gy; bool stopNear = false;
@@ -302,7 +306,9 @@ public class Room
             if (planted)
             {
                 gx = bombX; gy = bombY;
-                if (Dist(b.X, b.Y, gx, gy) < 50) { b.Keys = 16; return; }
+                var bd = Dist(b.X, b.Y, gx, gy);
+                if (defuser && bd < 45) { b.Keys = 16; return; }
+                stopNear = !defuser && bd < 250; // teammates cover the defuser
             }
             else { (gx, gy) = GameMap.SiteCenter(b.Seq % 2); stopNear = Dist(b.X, b.Y, gx, gy) < 250; }
         }
@@ -316,6 +322,12 @@ public class Room
         var sx = step.Item1 - b.X; var sy = step.Item2 - b.Y;
         b.Keys = (sx > 12 ? 8 : sx < -12 ? 2 : 0) | (sy > 12 ? 4 : sy < -12 ? 1 : 0);
         if (tgt == null && (sx != 0 || sy != 0)) b.Angle = MathF.Atan2(sy, sx);
+    }
+
+    bool IsDefuser(Player b)
+    {
+        var d = Dist(b.X, b.Y, bombX, bombY);
+        return !Players.Values.Any(o => o != b && o.IsBot && o.Alive && o.Team == "CT" && Dist(o.X, o.Y, bombX, bombY) < d);
     }
 
     // ---------- snapshots ----------
@@ -342,6 +354,7 @@ public class Room
                 t = ScoreT, ct = ScoreCt, phase = Phase, left = Math.Max(0, phaseEnd - time), round = RoundNo, msg = Msg,
                 bomb = new { planted, x = planted ? bombX : showDrop ? dropX : (float?)null, y = planted ? bombY : showDrop ? dropY : (float?)null, dropped = showDrop },
                 me = new { v.Money, v.Hp, v.Armor, v.Ammo, v.Weapon, v.ActionProg, hasBomb = carrier == v.Id, canBuy = CanBuy() && v.Alive, reloading = v.ReloadEnd > 0 },
+                feed = feed.Where(f => time - f.T < 6).TakeLast(5).Select(f => new { killer = f.Killer, kTeam = f.KTeam, victim = f.Victim, vTeam = f.VTeam, weapon = f.Weapon }).ToArray(),
                 board = Players.Values.Select(p => new { p.Id, p.Name, p.Team, p.Kills, p.Deaths, p.Alive }).ToArray(),
                 players = vis.Select(p => new { p.Id, p.Name, p.Team, p.X, p.Y, p.Angle, p.Hp, p.Weapon, p.ActionProg }).ToArray(),
                 shots = Shots.Where(s => ids.Contains(s.Shooter)).Select(s => new[] { s.X1, s.Y1, s.X2, s.Y2 }).ToArray(),

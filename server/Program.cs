@@ -3,12 +3,12 @@ using Cs2D.Server.Game;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = AppContext.BaseDirectory });
 builder.Services.AddSingleton<UserStore>();
 builder.Services.AddSingleton<GameService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<GameService>());
 builder.Services.AddSignalR();
-builder.Services.AddCors(o => o.AddDefaultPolicy(p => p.SetIsOriginAllowed(o => new Uri(o).IsLoopback).AllowAnyHeader().AllowAnyMethod().AllowCredentials()));
+builder.Services.AddCors(o => o.AddDefaultPolicy(p => p.SetIsOriginAllowed(_ => true).AllowAnyHeader().AllowAnyMethod().AllowCredentials()));
 builder.Services.AddAuthorization();
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
 {
@@ -29,7 +29,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
 });
 
 var app = builder.Build();
-app.UseCors(); app.UseAuthentication(); app.UseAuthorization();
+app.UseDefaultFiles(); app.UseStaticFiles(); app.UseCors(); app.UseAuthentication(); app.UseAuthorization();
 
 app.MapPost("/api/register", (Credentials c, UserStore s, IConfiguration cfg) =>
 {
@@ -44,4 +44,5 @@ app.MapPost("/api/login", (Credentials c, UserStore s, IConfiguration cfg) =>
     return u == null ? Results.Unauthorized() : Results.Ok(new { token = Jwt.Create(u, cfg), name = u.Name });
 });
 app.MapHub<GameHub>("/hub/game");
-app.Run("http://localhost:5275");
+app.MapFallbackToFile("index.html");
+app.Run(builder.Configuration["urls"] ?? "http://0.0.0.0:5275"); // listen on all interfaces so LAN players can connect

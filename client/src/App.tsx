@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import Game from './Game'
+import { BASE as API } from './config'
 
-const API = 'http://localhost:5275'
 
 export default function App() {
   const [auth, setAuth] = useState<{ token: string; name: string } | null>(() => {
@@ -18,7 +18,7 @@ export default function App() {
   }
 
   if (!auth) return (
-    <div className="center"><h1>CS2D · Dust II</h1>
+    <div className="center"><h1>CS2D<small>DUST II · CASUAL</small></h1>
       <input placeholder="Username" value={u} onChange={e => setU(e.target.value)} />
       <input placeholder="Password" type="password" value={p} onChange={e => setP(e.target.value)} />
       <div><button onClick={() => submit('login')}>Log in</button> <button onClick={() => submit('register')}>Register</button></div>
@@ -29,5 +29,5 @@ export default function App() {
   return (
     <div className="center"><h1>Welcome, {auth.name}</h1>
       <button onClick={() => setPlaying(true)}>Find casual match · Dust II</button>
-      <button onClick={() => { localStorage.removeItem('auth'); setAuth(null) }}>Log out</button></div>)
+      <button className="ghost" onClick={() => { localStorage.removeItem("auth"); setAuth(null) }}>Log out</button></div>)
 }
