@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>de_dust2 - 3D walkability review</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #101214; color: #d8dde2; font: 13px/1.4 Consolas, monospace; overflow: hidden; }
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+  #gl.drag { cursor: grabbing; }
+  #panel { position: fixed; top: 10px; left: 10px; width: 330px; max-height: calc(100% - 20px); overflow: auto;
+           background: rgba(16,18,20,.88); border: 1px solid #333a40; border-radius: 6px; padding: 10px; }
+  #panel h1 { font-size: 14px; margin: 0 0 6px; }
+  #panel h2 { font-size: 12px; margin: 10px 0 4px; color: #9fb3c2; }
+  #panel label { display: block; margin: 3px 0; }
+  #info { color: #9fb3c2; white-space: pre-wrap; min-height: 3em; border: 1px solid #2a3036; padding: 6px; border-radius: 4px; }
+  textarea { width: 100%; height: 70px; background: #0b0d0f; color: #d8dde2; border: 1px solid #333a40; font: inherit; box-sizing: border-box; }
+  button, select, input[type=number] { background: #1c2126; color: #d8dde2; border: 1px solid #3a434b; font: inherit; padding: 2px 6px; }
+  #notes { white-space: pre-wrap; max-height: 160px; overflow: auto; border: 1px solid #2a3036; padding: 6px; border-radius: 4px; background: #0b0d0f; }
+  #help { position: fixed; bottom: 10px; right: 10px; background: rgba(16,18,20,.85); border: 1px solid #333a40; border-radius: 6px; padding: 8px; color: #9fb3c2; }
+  #status { position: fixed; top: 10px; right: 10px; color: #ffd27a; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="panel">
+  <h1>de_dust2 walkability - 3D review</h1>
+  <div id="info">Loading radar...</div>
+
+  <h2>Selected cell / object</h2>
+  <div id="sel">Click the floor or an object to select it.</div>
+  <label>Height (world units): <input id="selH" type="number" step="any" style="width:80px"> <button id="applyH">apply</button></label>
+  <label>Mark:
+    <select id="selType">
+      <option value="auto">auto (from radar)</option>
+      <option value="walk">walkable</option>
+      <option value="wall">blocked</option>
+      <option value="jump">jumpable box/barrel</option>
+      <option value="hide">tall cover (hide behind)</option>
+    </select>
+  </label>
+  <textarea id="note" placeholder="Your note for this cell/object, e.g. 'too high, should be blue'"></textarea>
+  <button id="saveNote">save note</button>
+
+  <h2>Notes (copy and send to me)</h2>
+  <div id="notes">(none yet)</div>
+  <button id="copyNotes">copy notes</button>
+  <button id="clearNotes">clear</button>
+
+  <h2>Display</h2>
+  <label><input type="checkbox" id="showRadar" checked> radar texture on floor</label>
+  <label><input type="checkbox" id="showObjs" checked> show objects</label>
+  <label><input type="checkbox" id="showGrid" > grid lines</label>
+</div>
+
+<div id="help">
+  Drag: orbit &nbsp; Right-drag / Shift+drag: pan &nbsp; Wheel: zoom<br>
+  W A S D: move &nbsp; Q/E: down/up &nbsp; Shift: fast<br>
+  Left click: select &nbsp; Esc: deselect
+</div>
+<div id="status"></div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+const RADAR_URL   = "de_dust2_radar_copy.png";
+const PX_PER_CELL = 4;          // 1024 px radar -> 256 x 256 cells
+const WORLD_PER_CELL = 4 * 4.4; // 4 radar px * 4.4 world units/radar px  (CS2 overview scale)
+const LOW_H   = 0;              // blue floor height
+const HIGH_H  = 32;             // green floor height (default guess, edit per cell)
+const OBJ_H   = 40;             // default object height (box / barrel guess: jumpable)
+const JUMP_H  = 40, HIDE_H = 120;
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+const N = 1024 / PX_PER_CELL;   // 256
+let cellKind = new Uint8Array(N * N);   // 0 void, 1 floor, 2 object(block)
+let cellH    = new Float32Array(N * N); // floor height per cell
+let cellMark = new Uint8Array(N * N);   // 0 auto, 1 walk, 2 wall, 3 jump, 4 hide (per cell override)
+let objects  = [];                      // {id, x0,y0,x1,y1, h, mark, note, cells:Int32Array}
+let objOf    = new Int32Array(N * N).fill(-1);
+let notes    = [];
+let selection = null;                   // {type:'cell', idx} or {type:'obj', id}
+
+const info = document.getElementById("info");
+const status = (t) => document.getElementById("status").textContent = t;
+
+// ---------------------------------------------------------------------------
+// Radar classification
+// ---------------------------------------------------------------------------
+function classify(img) {
+  const c = document.createElement("canvas");
+  c.width = 1024; c.height = 1024;
+  const g = c.getContext("2d", { willReadFrequently: true });
+  g.drawImage(img, 0, 0, 1024, 1024);
+  const data = g.getImageData(0, 0, 1024, 1024).data; // throws if canvas is tainted (file://)
+
+  // per cell average over PX_PER_CELL x PX_PER_CELL block
+  const rgb = new Float32Array(N * N * 3), alpha = new Float32Array(N * N);
+  for (let cy = 0; cy < N; cy++) for (let cx = 0; cx < N; cx++) {
+    let r = 0, gg = 0, b = 0, a = 0, cnt = 0;
+    for (let y = 0; y < PX_PER_CELL; y++) for (let x = 0; x < PX_PER_CELL; x++) {
+      const p = ((cy * PX_PER_CELL + y) * 1024 + (cx * PX_PER_CELL + x)) * 4;
+      a += data[p + 3];
+      if (data[p + 3] > 128) { r += data[p]; gg += data[p + 1]; b += data[p + 2]; cnt++; }
+    }
+    const i = cy * N + cx;
+    alpha[i] = a / (PX_PER_CELL * PX_PER_CELL) / 255;
+    if (cnt) { rgb[i * 3] = r / cnt; rgb[i * 3 + 1] = gg / cnt; rgb[i * 3 + 2] = b / cnt; }
+  }
+
+  for (let i = 0; i < N * N; i++) {
+    const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+    if (alpha[i] < 0.5) { cellKind[i] = 0; continue; }           // background
+    const sat = Math.max(r, g, b) - Math.min(r, g, b);
+    const neutralGray = sat < 8 && r > 95;                       // grey crates/barrels (~115-130)
+    if (neutralGray) { cellKind[i] = 2; continue; }
+    cellKind[i] = 1;
+    // blue (b > g > r) = low ; olive/green (g >= b, r ~ g) = high ; gradient in between
+    const blueness  = (b - r) / 40;          // blue ~ 1, green ~ -0.4
+    const greenness = (g - b) / 30;          // green ~ 0.8, blue ~ -0.1
+    let t = 0.5 + 0.5 * (0.6 * greenness - 0.4 * blueness) * 2;  // 0 blue .. 1 green
+    t = Math.min(1, Math.max(0, t));
+    cellH[i] = LOW_H + t * (HIGH_H - LOW_H);
+  }
+}
+
+// connected components of grey object cells -> one object per crate/barrel
+function buildObjects() {
+  let id = 0;
+  const stack = [];
+  for (let i = 0; i < N * N; i++) {
+    if (cellKind[i] !== 2 || objOf[i] !== -1) continue;
+    const list = [];
+    stack.push(i); objOf[i] = id;
+    while (stack.length) {
+      const k = stack.pop(); list.push(k);
+      const x = k % N, y = (k / N) | 0;
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= N || ny >= N) continue;
+        const j = ny * N + nx;
+        if (cellKind[j] === 2 && objOf[j] === -1) { objOf[j] = id; stack.push(j); }
+      }
+    }
+    if (list.length < 2) { // single stray cell: drop, treat as floor
+      for (const k of list) { objOf[k] = -1; cellKind[k] = 1; }
+      continue;
+    }
+    let x0 = N, y0 = N, x1 = 0, y1 = 0;
+    for (const k of list) { const x = k % N, y = (k / N) | 0;
+      x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+    objects.push({ id, x0, y0, x1, y1, h: OBJ_H, mark: "auto", note: "", cells: Int32Array.from(list) });
+    id++;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WebGL
+// ---------------------------------------------------------------------------
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl", { antialias: true });
+gl.getExtension("OES_element_index_uint"); // allow >65k vertex indices
+
+const VS = `
+attribute vec3 aPos; attribute vec3 aNor; attribute vec2 aUv; attribute vec3 aCol;
+uniform mat4 uVP; varying vec3 vN; varying vec2 vUv; varying vec3 vCol; varying vec3 vW;
+void main(){ vW = aPos; vN = aNor; vUv = aUv; vCol = aCol; gl_Position = uVP * vec4(aPos,1.0); }`;
+const FS = `
+precision mediump float;
+varying vec3 vN; varying vec2 vUv; varying vec3 vCol; varying vec3 vW;
+uniform sampler2D uTex; uniform float uUseTex; uniform vec3 uLight;
+void main(){
+  vec3 base = vCol;
+  if (uUseTex > 0.5) base = mix(base, texture2D(uTex, vUv).rgb, 0.85);
+  float d = max(dot(normalize(vN), normalize(uLight)), 0.0);
+  vec3 c = base * (0.45 + 0.55 * d);
+  gl_FragColor = vec4(c, 1.0);
+}`;
+function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+const prog = gl.createProgram();
+gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog); gl.useProgram(prog);
+const loc = {
+  aPos: gl.getAttribLocation(prog, "aPos"), aNor: gl.getAttribLocation(prog, "aNor"),
+  aUv: gl.getAttribLocation(prog, "aUv"), aCol: gl.getAttribLocation(prog, "aCol"),
+  uVP: gl.getUniformLocation(prog, "uVP"), uTex: gl.getUniformLocation(prog, "uTex"),
+  uUseTex: gl.getUniformLocation(prog, "uUseTex"), uLight: gl.getUniformLocation(prog, "uLight"),
+};
+gl.uniform3f(loc.uLight, 0.4, 1.0, 0.3);
+
+let texture = null, radarReady = false;
+let meshBuf = null, meshCount = 0;     // floor + object triangles, rebuilt on edits
+let gridBuf = null, gridCount = 0;
+
+function buildMesh() {
+  const pos = [], nor = [], uv = [], col = [], idx = [];
+  const push = (p, n, u, c) => { pos.push(...p); nor.push(...n); uv.push(...u); col.push(...c); return (pos.length / 3) - 1; };
+  const W = WORLD_PER_CELL;
+  // floor: one quad per floor cell, flat at its height (gaps appear as vertical steps via side faces)
+  const heightAt = (x, y) => (x < 0 || y < 0 || x >= N || y >= N) ? null : (cellKind[y * N + x] === 0 ? null : cellH[y * N + x]);
+  const colorFor = (i) => {
+    const m = cellMark[i];
+    if (m === 2) return [0.55, 0.2, 0.2];
+    if (m === 3) return [0.9, 0.7, 0.2];
+    if (m === 4) return [0.8, 0.3, 0.9];
+    if (m === 1) return [0.2, 0.8, 0.3];
+    return [0.25 + cellH[i] / HIGH_H * 0.35, 0.45 + cellH[i] / HIGH_H * 0.25, 0.55 - cellH[i] / HIGH_H * 0.2];
+  };
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const i = y * N + x;
+    if (cellKind[i] !== 1) continue;
+    const h = cellH[i];
+    const x0 = x * W, x1 = (x + 1) * W, z0 = y * W, z1 = (y + 1) * W;
+    const u0 = x / N, u1 = (x + 1) / N, v0 = y / N, v1 = (y + 1) / N;
+    const c = colorFor(i);
+    const a = push([x0, h, z0], [0, 1, 0], [u0, v0], c), b = push([x1, h, z0], [0, 1, 0], [u1, v0], c);
+    const cc = push([x1, h, z1], [0, 1, 0], [u1, v1], c), d = push([x0, h, z1], [0, 1, 0], [u0, v1], c);
+    idx.push(a, d, b, b, d, cc);
+    // side walls down to neighbours that are lower or void
+    const sides = [[1, 0, [x1, z0], [x1, z1], [0, 0, 1]], [-1, 0, [x0, z1], [x0, z0], [0, 0, -1]],
+                   [0, 1, [x1, z1], [x0, z1], [1, 0, 0]], [0, -1, [x0, z0], [x1, z0], [-1, 0, 0]]];
+    for (const [dx, dy, p1, p2, n] of sides) {
+      const nh = heightAt(x + dx, y + dy);
+      const low = nh === null ? 0 : nh;
+      if (nh !== null && nh >= h) continue;
+      if (h - low < 0.5) continue;
+      const sc = [c[0] * 0.6, c[1] * 0.6, c[2] * 0.6];
+      const s0 = push([p1[0], low, p1[1]], n, [0, 0], sc), s1 = push([p2[0], low, p2[1]], n, [0, 0], sc);
+      const s2 = push([p2[0], h, p2[1]], n, [0, 0], sc), s3 = push([p1[0], h, p1[1]], n, [0, 0], sc);
+      idx.push(s0, s1, s2, s0, s2, s3);
+    }
+  }
+  // objects: boxes
+  for (const o of objects) {
+    const hgt = o.h;
+    const bx0 = o.x0 * W, bx1 = (o.x1 + 1) * W, bz0 = o.y0 * W, bz1 = (o.y1 + 1) * W;
+    const base = o.mark === "wall" ? [0.8, 0.2, 0.2] : o.mark === "walk" ? [0.2, 0.8, 0.3] : o.mark === "jump" ? [0.95, 0.75, 0.2] : o.mark === "hide" ? [0.75, 0.35, 0.95] : [0.6, 0.6, 0.62];
+    const faces = [
+      [[bx0, 0, bz0], [bx1, 0, bz0], [bx1, hgt, bz0], [bx0, hgt, bz0], [0, 0, -1]],
+      [[bx1, 0, bz1], [bx0, 0, bz1], [bx0, hgt, bz1], [bx1, hgt, bz1], [0, 0, 1]],
+      [[bx0, 0, bz1], [bx0, 0, bz0], [bx0, hgt, bz0], [bx0, hgt, bz1], [-1, 0, 0]],
+      [[bx1, 0, bz0], [bx1, 0, bz1], [bx1, hgt, bz1], [bx1, hgt, bz0], [1, 0, 0]],
+      [[bx0, hgt, bz0], [bx1, hgt, bz0], [bx1, hgt, bz1], [bx0, hgt, bz1], [0, 1, 0]],
+    ];
+    for (const f of faces) {
+      const shade = f[4][1] === 1 ? 1.0 : 0.7;
+      const cc = [base[0] * shade, base[1] * shade, base[2] * shade];
+      const p = [f[0], f[1], f[2], f[3]].map((q) => push(q, f[4], [0, 0], cc));
+      idx.push(p[0], p[1], p[2], p[0], p[2], p[3]);
+    }
+  }
+  const vdata = new Float32Array(pos.length + nor.length + uv.length + col.length);
+  // interleave: pos3 nor3 uv2 col3 = 11 floats per vertex
+  const nV = pos.length / 3, inter = new Float32Array(nV * 11);
+  for (let v = 0; v < nV; v++) {
+    inter.set(pos.slice(v * 3, v * 3 + 3), v * 11);
+    inter.set(nor.slice(v * 3, v * 3 + 3), v * 11 + 3);
+    inter.set(uv.slice(v * 2, v * 2 + 2), v * 11 + 6);
+    inter.set(col.slice(v * 3, v * 3 + 3), v * 11 + 8);
+  }
+  if (!meshBuf) meshBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, meshBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, inter, gl.STATIC_DRAW);
+  if (!gridBuf) gridBuf = gl.createBuffer();
+  meshIdx = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, meshIdx);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(idx), gl.STATIC_DRAW);
+  meshCount = idx.length;
+  void vdata;
+}
+let meshIdx = null;
+
+// ---------------------------------------------------------------------------
+// Camera (orbit + fly)
+// ---------------------------------------------------------------------------
+const cam = { tx: N * WORLD_PER_CELL / 2, ty: 0, tz: N * WORLD_PER_CELL / 2, yaw: 0.6, pitch: 0.9, dist: 2400 };
+const keys = {};
+let dragging = false, panning = false, lastX = 0, lastY = 0;
+
+function mat4mul(a, b) { const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s; }
+  return o; }
+function perspective(fov, asp, n, f) { const t = 1 / Math.tan(fov / 2), o = new Float32Array(16);
+  o[0] = t / asp; o[5] = t; o[10] = (f + n) / (n - f); o[11] = -1; o[14] = 2 * f * n / (n - f); return o; }
+function lookAt(e, c, u) {
+  let zx = e[0] - c[0], zy = e[1] - c[1], zz = e[2] - c[2]; let l = Math.hypot(zx, zy, zz); zx /= l; zy /= l; zz /= l;
+  let xx = u[1] * zz - u[2] * zy, xy = u[2] * zx - u[0] * zz, xz = u[0] * zy - u[1] * zx; l = Math.hypot(xx, xy, xz); xx /= l; xy /= l; xz /= l;
+  const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+  const o = new Float32Array(16);
+  o[0] = xx; o[4] = xy; o[8] = xz;  o[12] = -(xx * e[0] + xy * e[1] + xz * e[2]);
+  o[1] = yx; o[5] = yy; o[9] = yz;  o[13] = -(yx * e[0] + yy * e[1] + yz * e[2]);
+  o[2] = zx; o[6] = zy; o[10] = zz; o[14] = -(zx * e[0] + zy * e[1] + zz * e[2]); o[15] = 1;
+  return o;
+}
+function eye() {
+  const cp = Math.cos(cam.pitch);
+  return [cam.tx + cam.dist * cp * Math.sin(cam.yaw), cam.ty + cam.dist * Math.sin(cam.pitch), cam.tz + cam.dist * cp * Math.cos(cam.yaw)];
+}
+function viewProj() {
+  const asp = canvas.width / canvas.height;
+  const e = eye();
+  return mat4mul(perspective(Math.PI / 3.2, asp, 5, 60000), lookAt(e, [cam.tx, cam.ty, cam.tz], [0, 1, 0]));
+}
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(innerWidth * dpr); canvas.height = Math.floor(innerHeight * dpr);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+addEventListener("resize", resize);
+
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("mousedown", (e) => { dragging = true; panning = e.button === 2 || e.shiftKey; lastX = e.clientX; lastY = e.clientY; canvas.classList.add("drag"); });
+addEventListener("mouseup", () => { dragging = false; canvas.classList.remove("drag"); });
+addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  if (panning) {
+    // pan the look-at point across the ground, map follows the mouse
+    const s = cam.dist * 0.0015, dx = e.clientX - lastX, dy = e.clientY - lastY;
+    const fx = -Math.sin(cam.yaw), fz = -Math.cos(cam.yaw), rx = Math.cos(cam.yaw), rz = -Math.sin(cam.yaw);
+    cam.tx += (-dx * rx - dy * fx) * s; cam.tz += (-dx * rz - dy * fz) * s;
+  } else {
+    cam.yaw -= (e.clientX - lastX) * 0.005;
+    cam.pitch = Math.min(1.5, Math.max(0.05, cam.pitch + (e.clientY - lastY) * 0.005));
+  }
+  lastX = e.clientX; lastY = e.clientY;
+});
+canvas.addEventListener("wheel", (e) => { e.preventDefault(); cam.dist = Math.min(20000, Math.max(100, cam.dist * (1 + e.deltaY * 0.001))); }, { passive: false });
+addEventListener("keydown", (e) => { keys[e.code] = true; if (e.code === "Escape") clearSel(); });
+addEventListener("keyup", (e) => { keys[e.code] = false; });
+
+function flyStep(dt) {
+  const sp = (keys.ShiftLeft || keys.ShiftRight ? 1800 : 600) * dt;
+  const fx = -Math.sin(cam.yaw), fz = -Math.cos(cam.yaw), rx = Math.cos(cam.yaw), rz = -Math.sin(cam.yaw);
+  let mx = 0, mz = 0, my = 0;
+  if (keys.KeyW) { mx += fx; mz += fz; } if (keys.KeyS) { mx -= fx; mz -= fz; }
+  if (keys.KeyD) { mx += rx; mz += rz; } if (keys.KeyA) { mx -= rx; mz -= rz; }
+  if (keys.KeyE) my += 1; if (keys.KeyQ) my -= 1;
+  cam.tx += mx * sp; cam.tz += mz * sp; cam.ty += my * sp;
+}
+
+// ---------------------------------------------------------------------------
+// Picking: ray march through the height field and objects
+// ---------------------------------------------------------------------------
+function pick(px, py) {
+  const rect = canvas.getBoundingClientRect();
+  const nx = ((px - rect.left) / rect.width) * 2 - 1, ny = 1 - ((py - rect.top) / rect.height) * 2;
+  const inv = invert(viewProj());
+  const a = unproject(inv, nx, ny, -1), b = unproject(inv, nx, ny, 1);
+  const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const W = WORLD_PER_CELL;
+  const step = W * 0.25;
+  const L = Math.hypot(...d); const dn = d.map((v) => v / L);
+  for (let t = 0; t < 60000; t += step) {
+    const p = [a[0] + dn[0] * t, a[1] + dn[1] * t, a[2] + dn[2] * t];
+    const cx = Math.floor(p[0] / W), cy = Math.floor(p[2] / W);
+    if (cx < 0 || cy < 0 || cx >= N || cy >= N) { if (t > 30000) break; continue; }
+    const i = cy * N + cx;
+    if (cellKind[i] === 2) { const o = objects[objOf[i]]; if (o && p[1] <= o.h) return { type: "obj", id: o.id }; }
+    if (cellKind[i] === 1 && p[1] <= cellH[i] + 0.5) return { type: "cell", idx: i };
+  }
+  return null;
+}
+function unproject(inv, x, y, z) { const w = inv[3] * x + inv[7] * y + inv[11] * z + inv[15];
+  return [(inv[0] * x + inv[4] * y + inv[8] * z + inv[12]) / w, (inv[1] * x + inv[5] * y + inv[9] * z + inv[13]) / w, (inv[2] * x + inv[6] * y + inv[10] * z + inv[14]) / w]; }
+function invert(m) { const inv = new Float32Array(16); const a = m;
+  inv[0]=a[5]*a[10]*a[15]-a[5]*a[11]*a[14]-a[9]*a[6]*a[15]+a[9]*a[7]*a[14]+a[13]*a[6]*a[11]-a[13]*a[7]*a[10];
+  inv[4]=-a[4]*a[10]*a[15]+a[4]*a[11]*a[14]+a[8]*a[6]*a[15]-a[8]*a[7]*a[14]-a[12]*a[6]*a[11]+a[12]*a[7]*a[10];
+  inv[8]=a[4]*a[9]*a[15]-a[4]*a[11]*a[13]-a[8]*a[5]*a[15]+a[8]*a[7]*a[13]+a[12]*a[5]*a[11]-a[12]*a[7]*a[9];
+  inv[12]=-a[4]*a[9]*a[14]+a[4]*a[10]*a[13]+a[8]*a[5]*a[14]-a[8]*a[6]*a[13]-a[12]*a[5]*a[10]+a[12]*a[6]*a[9];
+  inv[1]=-a[1]*a[10]*a[15]+a[1]*a[11]*a[14]+a[9]*a[2]*a[15]-a[9]*a[3]*a[14]-a[13]*a[2]*a[11]+a[13]*a[3]*a[10];
+  inv[5]=a[0]*a[10]*a[15]-a[0]*a[11]*a[14]-a[8]*a[2]*a[15]+a[8]*a[3]*a[14]+a[12]*a[2]*a[11]-a[12]*a[3]*a[10];
+  inv[9]=-a[0]*a[9]*a[15]+a[0]*a[11]*a[13]+a[8]*a[1]*a[15]-a[8]*a[3]*a[13]-a[12]*a[1]*a[11]+a[12]*a[3]*a[9];
+  inv[13]=a[0]*a[9]*a[14]-a[0]*a[10]*a[13]-a[8]*a[1]*a[14]+a[8]*a[2]*a[13]+a[12]*a[1]*a[10]-a[12]*a[2]*a[9];
+  inv[2]=a[1]*a[6]*a[15]-a[1]*a[7]*a[14]-a[5]*a[2]*a[15]+a[5]*a[3]*a[14]+a[13]*a[2]*a[7]-a[13]*a[3]*a[6];
+  inv[6]=-a[0]*a[6]*a[15]+a[0]*a[7]*a[14]+a[4]*a[2]*a[15]-a[4]*a[3]*a[14]-a[12]*a[2]*a[7]+a[12]*a[3]*a[6];
+  inv[10]=a[0]*a[5]*a[15]-a[0]*a[7]*a[13]-a[4]*a[1]*a[15]+a[4]*a[3]*a[13]+a[12]*a[1]*a[7]-a[12]*a[3]*a[5];
+  inv[14]=-a[0]*a[5]*a[14]+a[0]*a[6]*a[13]+a[4]*a[1]*a[14]-a[4]*a[2]*a[13]-a[12]*a[1]*a[6]+a[12]*a[2]*a[5];
+  inv[3]=-a[1]*a[6]*a[11]+a[1]*a[7]*a[10]+a[5]*a[2]*a[11]-a[5]*a[3]*a[10]-a[9]*a[2]*a[7]+a[9]*a[3]*a[6];
+  inv[7]=a[0]*a[6]*a[11]-a[0]*a[7]*a[10]-a[4]*a[2]*a[11]+a[4]*a[3]*a[10]+a[8]*a[2]*a[7]-a[8]*a[3]*a[6];
+  inv[11]=-a[0]*a[5]*a[11]+a[0]*a[7]*a[9]+a[4]*a[1]*a[11]-a[4]*a[3]*a[9]-a[8]*a[1]*a[7]+a[8]*a[3]*a[5];
+  inv[15]=a[0]*a[5]*a[10]-a[0]*a[6]*a[9]-a[4]*a[1]*a[10]+a[4]*a[2]*a[9]+a[8]*a[1]*a[6]-a[8]*a[2]*a[5];
+  let det = a[0]*inv[0]+a[1]*inv[4]+a[2]*inv[8]+a[3]*inv[12];
+  det = 1 / det; for (let i = 0; i < 16; i++) inv[i] *= det; return inv; }
+
+// ---------------------------------------------------------------------------
+// Selection / notes UI
+// ---------------------------------------------------------------------------
+const selDiv = document.getElementById("sel"), selH = document.getElementById("selH"),
+      selType = document.getElementById("selType"), noteBox = document.getElementById("note");
+function clearSel() { selection = null; selDiv.textContent = "Click the floor or an object to select it."; selH.value = ""; noteBox.value = ""; }
+function cellName(i) { return "cell x" + (i % N) + " y" + ((i / N) | 0); }
+function showSel() {
+  if (!selection) return clearSel();
+  if (selection.type === "cell") {
+    const i = selection.idx;
+    selDiv.textContent = cellName(i) + "\nfloor height " + cellH[i].toFixed(1) + "\nmark: " + ["auto", "walk", "wall", "jump", "hide"][cellMark[i]];
+    selH.value = cellH[i].toFixed(1);
+    selType.value = ["auto", "walk", "wall", "jump", "hide"][cellMark[i]];
+    noteBox.value = "";
+  } else {
+    const o = objects[selection.id];
+    selDiv.textContent = "object #" + o.id + " (" + (o.x1 - o.x0 + 1) + "x" + (o.y1 - o.y0 + 1) + " cells)\nheight " + o.h + " units";
+    selH.value = o.h; selType.value = o.mark; noteBox.value = o.note;
+  }
+}
+document.getElementById("applyH").onclick = () => {
+  if (!selection) return; const v = parseFloat(selH.value); if (isNaN(v)) return;
+  if (selection.type === "cell") { cellH[selection.idx] = v; } else { objects[selection.id].h = v; }
+  buildMesh(); showSel();
+};
+selType.onchange = () => {
+  if (!selection) return; const m = selType.value;
+  const mi = ["auto", "walk", "wall", "jump", "hide"].indexOf(m);
+  if (selection.type === "cell") { cellMark[selection.idx] = mi; }
+  else { const o = objects[selection.id]; o.mark = m;
+    if (m === "jump") o.h = JUMP_H; if (m === "hide") o.h = HIDE_H; if (m === "wall") o.h = o.h || OBJ_H; }
+  buildMesh(); showSel();
+};
+document.getElementById("saveNote").onclick = () => {
+  if (!selection) return; const text = noteBox.value.trim(); if (!text) return;
+  const where = selection.type === "cell" ? cellName(selection.idx) + " (floor h " + cellH[selection.idx].toFixed(1) + ")"
+                                         : "object #" + selection.id + " (h " + objects[selection.id].h + ")";
+  if (selection.type === "obj") objects[selection.id].note = text;
+  notes.push(where + ": " + text); renderNotes();
+};
+function renderNotes() { document.getElementById("notes").textContent = notes.length ? notes.map((n, k) => (k + 1) + ". " + n).join("\n") : "(none yet)"; }
+document.getElementById("copyNotes").onclick = () => navigator.clipboard && navigator.clipboard.writeText(notes.join("\n"));
+document.getElementById("clearNotes").onclick = () => { notes = []; renderNotes(); };
+document.getElementById("showRadar").onchange = (e) => { useRadar = e.target.checked; };
+document.getElementById("showObjs").onchange = (e) => { showObjs = e.target.checked; };
+document.getElementById("showGrid").onchange = (e) => { showGrid = e.target.checked; };
+let useRadar = true, showObjs = true, showGrid = false;
+
+canvas.addEventListener("click", (e) => {
+  if (dragging && (Math.abs(e.clientX - lastX) + Math.abs(e.clientY - lastY)) > 3) return;
+  const p = pick(e.clientX, e.clientY);
+  if (!p) return clearSel();
+  selection = p.type === "cell" ? { type: "cell", idx: p.idx } : { type: "obj", id: p.id };
+  showSel();
+});
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+function draw() {
+  gl.clearColor(0.06, 0.07, 0.08, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK);
+  if (!meshBuf) return;
+  const vp = viewProj();
+  gl.uniformMatrix4fv(loc.uVP, false, vp);
+  gl.uniform1f(loc.uUseTex, useRadar && radarReady ? 1 : 0);
+  if (radarReady) { gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texture); gl.uniform1i(loc.uTex, 0); }
+  gl.bindBuffer(gl.ARRAY_BUFFER, meshBuf);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, meshIdx);
+  const S = 11 * 4;
+  gl.enableVertexAttribArray(loc.aPos); gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, S, 0);
+  gl.enableVertexAttribArray(loc.aNor); gl.vertexAttribPointer(loc.aNor, 3, gl.FLOAT, false, S, 12);
+  gl.enableVertexAttribArray(loc.aUv); gl.vertexAttribPointer(loc.aUv, 2, gl.FLOAT, false, S, 24);
+  gl.enableVertexAttribArray(loc.aCol); gl.vertexAttribPointer(loc.aCol, 3, gl.FLOAT, false, S, 32);
+  gl.drawElements(gl.TRIANGLES, meshCount, gl.UNSIGNED_INT, 0);
+}
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  flyStep(dt); draw(); requestAnimationFrame(frame);
+}
+
+function setupRadarTexture(img) {
+  texture = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  radarReady = true;
+}
+
+const img = new Image();
+img.onload = () => {
+  try {
+    classify(img);
+    buildObjects();
+    setupRadarTexture(img);
+    buildMesh();
+    const nObj = objects.length, nFloor = cellKind.reduce((s, k) => s + (k === 1 ? 1 : 0), 0);
+    info.textContent = "floor cells: " + nFloor + "\nobjects (boxes/barrels): " + nObj +
+      "\nblue = low, green = high, gradients = ramps\nClick a cell or object, set its height/mark, add a note.";
+    resize();
+    requestAnimationFrame(frame);
+  } catch (err) {
+    info.textContent = "Could not read the radar pixels: " + err.message +
+      "\nOpen this page through a local web server (e.g. run 'python -m http.server 8000' in this folder and open http://localhost:8000/), not as a file.";
+    console.error(err);
+  }
+};
+img.onerror = () => { info.textContent = "Could not load " + RADAR_URL; };
+img.src = RADAR_URL;
+resize();
+</script>
+</body>
+</html>
